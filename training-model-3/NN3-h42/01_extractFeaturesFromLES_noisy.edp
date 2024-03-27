@@ -1,0 +1,303 @@
+///////////////////////////
+/// Physical parameters ///
+///////////////////////////
+
+real Re    = 2500;   // Reynolds_theta
+real Umax  = 16.8;   // Free-stream velocity
+real delta = 0.0036; // delta_theta
+real nu    = Umax * delta / Re ;
+
+//////////////////////////////
+/// Geometrical parameters ///
+//////////////////////////////
+
+real C     = 305.0/1000;
+real[int] bumps = [20, 26, 31, 38, 42];
+
+///////////////////////////////////
+/// Loop for each training case ///
+///////////////////////////////////
+bool waitplt = false;
+
+for(int i = 0; i < bumps.n; i++){
+
+    int nummesh = bumps[i];   // Mesh index
+    
+    //////////////////////////////////
+    /// Create mesh and FEM spaces ///
+    //////////////////////////////////
+
+    mesh th =  readmesh("../../mesh/mesh_training/h"+nummesh+"/mesh_bump_h"+nummesh+".msh");
+    
+    fespace fuupu(th,[P1b,P1b,P1,P1b]);
+    fespace fuup(th,[P1b,P1b,P1]);
+    fespace fu(th,P1b);
+    fespace fp(th,P1);
+    fespace f0(th,P0);
+
+    int nbv = th.nv;
+    int nbt = th.nt;
+
+    cout << "n DoF (V) : " << fu.ndof << endl;
+    cout << "n DoF (P) : " << fp.ndof << endl;
+    
+    //////////////////////////////
+    /// Load distance function ///
+    //////////////////////////////
+
+    f0 d,d2;
+    {
+      ifstream file("../../mesh/mesh_training/h"+nummesh+"/distance-wall-h"+nummesh+".txt");
+      file >> d[];
+      d2 = d*d;
+    }
+
+    //////////////////////////
+    /// Load RANS solution ///
+    //////////////////////////
+    
+    fuup [ub,vb,pb];fu nutb;
+    {
+      ifstream file("../../baseline-shorter/results/h"+nummesh+"/baseline-solution-h"+nummesh+"-Re-"+Re+".txt");
+      file >> ub[];
+      file >> nutb[];
+    }
+    
+    // SA constants
+
+    real cv1    = 7.1;
+    real cb1    = 0.1355;
+    real cb2    = 0.622;
+    real sigma  = 2./3.;
+    real kk     = 0.41;
+    real cw1    = 0.1355/(kk^2.) + (1.+cb2)/sigma;
+    real cw2    = 0.3;
+    real cw3    = 2.;
+    real M      = 0.00001;
+
+
+    // For Spallart Almaras
+    fu xi,xi2,xi3,csiSA,dcsiSAdnut,csiNS,dcsiNSdnut,S,dSduv,fv1,dfv1dnu,nuT,fv2,dft2dnu,dStildeduv,dsddxnu,dsddynu,gn,dgndxi;
+    f0 S0,Sbar,dSbardnu,Stilde,dStildednu,r,rp,drdnu,drduv,g,dgdr,fw,dfwdg,dfwdnu,dfwduv,normu;
+    f0 su,dsdnuu,dsduvu;
+    f0 s,dsdnu,dsduv;
+    
+    // ===========================
+    // Computation of SA functions
+    //============================
+
+    xi = nutb/nu;
+    xi2 = xi*(nutb/nu);
+    xi3 = xi2*(nutb/nu);
+    csiSA = (xi>=0.)*nu*(1.+xi) + (xi<0.)*nu*(1.+xi+0.5*xi2);
+    dcsiSAdnut = (xi>=0.)*1. + (xi<0.)*(1.+xi);
+    fv1 = (xi3)/(xi3 + cv1^3);
+    dfv1dnu = (3./nu)*(cv1^3)*(xi2)/((xi3+cv1^3)^2);
+    nuT = nutb*fv1;
+    csiNS = nu + (nuT>=0.)*nuT;
+    dcsiNSdnut = (nuT>=0.)*(fv1 + nutb*dfv1dnu);
+    S = sqrt((dy(ub) - dx(vb))^2 + M^2 ) - M;
+    S0 = S;
+    dSduv = (dy(ub) - dx(vb))/sqrt( (dy(ub) - dx(vb))^2 + M^2 );
+    fv2 = 1. - xi/( 1. + xi*fv1 );
+    Sbar = nutb*fv2/(kk*kk*d2);
+    dSbardnu = (1./(kk*kk*d2))*( fv2 + xi*(nu*xi2*dfv1dnu - 1.)/((1.+xi*fv1)^2) );
+    Stilde = Sbar + S0;
+    dStildednu = dSbardnu;
+    dStildeduv = dSduv;
+    rp = nutb/(Stilde*kk*kk*d2);
+    r = (rp<0. || rp>10.)*(10.) + (rp>=0. && rp<=10.)*rp;
+    drdnu = (rp>=0. && rp<=10.)*r*(1./nutb - dStildednu/Stilde);
+    drduv = (rp>=0. && rp<=10.)*( - r*dStildeduv/Stilde );
+    g = r + cw2*(r^6-r);
+    dgdr = 1. + cw2*(6.*r^5-1.);
+
+    fw = g*(( 1. + cw3^6 )/( g^6 + cw3^6 ) )^(1./6.);
+    dfwdg = (((1.+cw3^6)/(g^6+cw3^6))^(1./6.))*( 1. - (g^6)/(g^6+cw3^6) );
+    dfwdnu = dfwdg*dgdr*drdnu;
+    dfwduv = dfwdg*dgdr*drduv;
+
+    gn = 1. - 1000.*xi2/( 1. + xi2 );
+    dgndxi = - 2000.*xi/( ( 1. + xi2 )^2 );
+
+    su = (xi>=0.)*( cb1*Stilde*nutb - cw1*fw*(nutb^2)/d2 + (cb2/sigma)*(dx(nutb)^2 + dy(nutb)^2) )
+    + (xi< 0.)*( cb1*S*nutb*gn   + cw1*(nutb^2)/d2    + (cb2/sigma)*(dx(nutb)^2 + dy(nutb)^2) );
+    s = su;
+
+    dsdnuu = (xi>=0.)*( cb1*(dStildednu*nutb + Stilde) - cw1*( dfwdg*dgdr*drdnu*nutb*nutb/d2 + 2.*fw*nutb/d2 ) ) + (xi<0.)*( cb1*S*(gn + xi*dgndxi) + 2.*cw1*nutb/d2 );
+    dsdnu = dsdnuu;
+
+    dsduvu = (xi>=0.)*( cb1*nutb*dStildeduv - cw1*nutb*nutb*dfwdg*dgdr*drduv/d2 ) + (xi<0.)*cb1*nutb*gn*dSduv;
+    dsduv = dsduvu;
+
+    dsddxnu = ( 2.*cb2*dx(nutb)/sigma );
+    dsddynu = ( 2.*cb2*dy(nutb)/sigma );
+    
+    
+    //////////////////////////////////////////
+    /// Compute inputs for neural network ///
+    ////////////////////////////////////////
+    
+    ///-----------Q1
+
+    // Compute feature Q1: Q criterion
+    fu num,den,aux,Smag,Omag,Ecin,Q1,Q2,Q3,Q4,Q5,Q6,Q7,Q8;
+    fu S11,S12,S22,O12;
+    S11 = dx(ub);
+    S12 = 0.5 * (dy(ub) + dx(vb));
+    S22 = dy(vb);
+    O12 = 0.5*(dy(ub) - dx(vb));
+    //plot(S11,value=1,wait = true, cmm="S11");
+    //plot(S12,value=1,wait = true, cmm="S12");
+    Smag = sqrt( 2*(dx(ub)^2) + 2*(dy(vb)^2) + (dy(ub) + dx(vb))^2 ) ;
+    Smag = sqrt( 2* (S11^2 + S22^2 + 2*S12^2) );
+    Omag = sqrt( (dy(ub) - dx(vb))^2 ) ;
+    Omag = sqrt( 2* 2*O12^2) ;
+    num = 0.5*(Omag^2-Smag^2);
+    den = num+Smag^2 + 0.0001;
+    Q1 = num/den;
+    cout << Q1[].max << " " << Q1[].min << endl;
+
+    ///-----------Q2
+
+    // Compute feature Q2: Ferrero's blending function
+    fu rd;
+    num = abs(nu+nutb);
+    den = d2*kk^2*sqrt((dx(ub))^2+(dx(vb))^2+(dy(ub))^2+(dy(vb))^2);
+    rd = num/(den+0.0001);
+    Q2 = 1 - tanh((rd)^0.5); // Ferrero's function
+    cout << Q2[].max << " " << Q2[].min << endl;
+
+    ///-----------Q3
+
+    // Compute feature Q3: new blending function
+    num = abs(nu+nutb);
+    den = d2*kk^2*sqrt((dx(ub))^2+(dx(vb))^2+(dy(ub))^2+(dy(vb))^2);
+    rd = num/(den+0.0001);
+    Q3 = 1./(1.+rd);
+    cout << Q3[].max << " " << Q3[].min << endl;
+
+    ///-----------Q4
+
+    // Compute feature Q4: Spallart's blending function
+    num = nu+nutb;
+    den = d2*kk^2*sqrt((dx(ub))^2+(dx(vb))^2+(dy(ub))^2+(dy(vb))^2);
+    rd = num/(den+0.0001);
+    Q4 = 1 - tanh((8*rd)^3);
+    cout << Q4[].max << " " << Q4[].min << endl;
+
+    ///-----------Q5
+
+    // Compute feature Q5: Viscosity ratio
+    num =  nutb * fv1;
+    den = num + 100.*nu;
+    Q5 = num/den;
+    cout << Q5[].max << " " << Q5[].min << endl;
+
+    ///-----------Q6
+    
+    // Compute feature Q6: SA - production / destruction
+    num =  abs(cb1 * Stilde * nutb ) ;
+    den = abs(num) + ( cw1 * fw )*(nutb/d)^2 + 0.0001;
+    Q6 = num/den;
+    cout << Q6[].max << " " << Q6[].min << endl;
+
+    ///-----------Q7
+    
+    // Compute feature Q8: SA - production / diffusion
+    num =  abs(cb1 * Stilde * nutb ) ;
+    den = abs(num) + (cb2/sigma)*(dx(nutb)^2 + dy(nutb)^2) + 0.0001;
+    Q7 = num/den;
+    cout << Q7[].max << " " << Q7[].min << endl;
+
+    ///-----------Q8
+
+    // Compute feature Q8: k_qcr
+    Ecin = ub*ub + vb*vb;
+    num = abs(5.303300858899107  * nutb * fv1 * Smag);
+    den = num + 0.5*Ecin + 0.0001;
+    Q8 = num/den;
+    cout << Q8[].max << " " << Q8[].min << endl;
+
+    ///----------- Plot features
+
+    plot(Q1,value=1,wait = waitplt, cmm="Q1");
+    plot(Q2,value=1,wait = waitplt, cmm="Q2");
+    plot(Q3,value=1,wait = waitplt, cmm="Q3");
+    plot(Q4,value=1,wait = waitplt, cmm="Q4");
+    plot(Q5,value=1,wait = waitplt, cmm="Q5");
+    plot(Q6,value=1,wait = waitplt, cmm="Q6");
+    plot(Q7,value=1,wait = waitplt, cmm="Q7");
+    plot(Q8,value=1,wait = waitplt, cmm="Q8");
+    
+    // Compute nuTLES
+    
+    mesh the =  readmesh("../../mesh/mesh_interp/h"+nummesh+"/mesh_bump_h"+nummesh+".msh");
+    fespace fuuuuupe(the,[P1b,P1b,P1b,P1b,P1b,P1b,P1]); fespace fue(the,P1b);
+    fuuuuupe [ue,ve,uue,vve,wwe,uve,pe];
+
+    {
+      ifstream file("../../reference/results/h"+nummesh+"/reference-Ue-Ve-UUe-VVe-WWe-UVe-Pe-h"+nummesh+".txt");
+      file >> ue[];
+    }
+
+    fue kke    = ( uue + vve + wwe )/2.;
+    varf vProd(phi,psi) = int2d(the)( ( ( - uue + (2./3.)*kke )*2.*dx(ue) - 2.*uve*(dy(ue)+dx(ve)) + ( - vve + (2./3.)*kke )*2.*dy(ve) ) * psi );
+    varf vDest(phi,psi) = int2d(the)( (4.*(dx(ue)^2) + 4.*(dy(ve)^2) + 2.*((dx(ve)+dy(ue))^2) ) * psi );
+    varf vMass(phi,psi) = int2d(the)( phi * psi );
+
+    matrix MM = vMass(fue,fue);
+    fue prodr  = vProd(0,fue);
+    fue destr  = vDest(0,fue);
+    fue prod; prod[] = MM^-1 * prodr[];
+    fue dest; dest[] = MM^-1 * destr[];
+
+    fu nuTe;
+    //nuTe = min(max(0., prod/dest), 5000*nu);
+    nuTe = max(prod,0)/(max(dest,0)+50000.0);
+    plot(nuTe,value=1,wait = waitplt, cmm="nuTe");
+
+    // Compute corrective term dnuT = nuTe - nuT
+    fu dnuT = nuTe - nuT;
+    plot(dnuT,value=1,wait = waitplt, cmm="dnuT");
+    
+    ////////////////////////////
+    /// Export tecplot file ///
+    //////////////////////////
+    
+    {
+      ofstream file("./features/training-les-features-h"+nummesh+".dat");
+      file <<"TITLE = "<<"BUMP"<<endl;
+      file << "VARIABLES = \"X\" ,  \"Y\" , \"ub\" , \"vb\" , \"pb\" , \"nut-SA\" , \"Q1\" , \"Q2\" ,\"Q3\" , \"Q4\" , \"Q5\" , \"Q6\"  , \"Q7\", \"Q8\", \"dnuT\", \"nuT\", \"nuTe\" " << endl;
+      file << "ZONE"<<"   "<<"N="<<th.nv<<","<<"E="<<th.nt<<","<<"F=FEPOINT,ET=TRIANGLE"<<endl;
+      
+      for (int i=0; i<nbv; i++){
+      real xt = th(i).x;
+      real yt = th(i).y;
+      file  << xt << " "
+            << yt << " "
+            << ub(xt,yt) << " "
+            << vb(xt,yt) << " "
+            << pb(xt,yt) << " "
+            << nutb(xt,yt) << " "
+            << Q1(xt,yt) << " "
+            << Q2(xt,yt) << " "
+            << Q3(xt,yt) << " "
+            << Q4(xt,yt) << " "
+            << Q5(xt,yt) << " "
+            << Q6(xt,yt) << " "
+            << Q7(xt,yt) << " "
+            << Q8(xt,yt) << " "
+            << dnuT(xt,yt)/nu << " "
+            << nuT(xt,yt)/nu << " "
+            << nuTe(xt,yt)/nu 
+            << endl;
+      };
+      
+      // List connectivity
+      for (int k=0; k<nbt; k++){
+      file << int(th[k][0])+1 << " " << int(th[k][1])+1 << " " << int(th[k][2])+1 << endl;
+      };
+    };
+
+};

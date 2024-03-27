@@ -1,0 +1,280 @@
+
+func int computeInputs(real[int] &flow){
+  
+  // SA constants
+  real nutinf = 3.;
+  real cv1    = 7.1;
+  real cb1    = 0.1355;
+  real cb2    = 0.622;
+  real sigma  = 2./3.;
+  real kk     = 0.41;
+  real cw1    = 0.1355/(kk^2.) + (1.+cb2)/sigma;
+  real cw2    = 0.3;
+  real cw3    = 2.;
+  real M      = 0.00001;
+  
+  // Unwrap inputs
+  UhxUhxPhxUh [ub,vb,pb,nutb]; ub[] = flow;
+  
+  // force, to be computed
+  //UhxUh [fx,fy];
+  Uh fx,fy;
+  
+  // For distance function
+  P0h d,d2;
+  {
+    ifstream file("../../../../mesh/mesh_training/h"+nummesh+"/distance-wall-h"+nummesh+".txt");
+    file >> d[];
+    d2 = d*d;
+  }
+  
+  // For Spallart Almaras
+  Uh xi,xi2,xi3,csiSA,dcsiSAdnut,csiNS,dcsiNSdnut,S,dSduv,fv1,dfv1dnu,nuT,fv2,dft2dnu,dStildeduv,dsddxnu,dsddynu,gn,dgndxi;
+  P0h S0,Sbar,dSbardnu,Stilde,dStildednu,r,rp,drdnu,drduv,g,dgdr,fw,dfwdg,dfwdnu,dfwduv,normu;
+  P0h su,dsdnuu,dsduvu;
+  P0h s,dsdnu,dsduv;
+  
+  // ===========================
+  // Computation of SA functions
+  //============================
+  
+  xi = nutb/nu;
+  xi2 = xi*(nutb/nu);
+  xi3 = xi2*(nutb/nu);
+  csiSA = (xi>=0.)*nu*(1.+xi) + (xi<0.)*nu*(1.+xi+0.5*xi2);
+  dcsiSAdnut = (xi>=0.)*1. + (xi<0.)*(1.+xi);
+  fv1 = (xi3)/(xi3 + cv1^3);
+  dfv1dnu = (3./nu)*(cv1^3)*(xi2)/((xi3+cv1^3)^2);
+  nuT = nutb*fv1;
+  csiNS = nu + (nuT>=0.)*nuT;
+  dcsiNSdnut = (nuT>=0.)*(fv1 + nutb*dfv1dnu);
+  S = sqrt((dy(ub) - dx(vb))^2 + M^2 ) - M;
+  S0 = S;
+  dSduv = (dy(ub) - dx(vb))/sqrt( (dy(ub) - dx(vb))^2 + M^2 );
+  fv2 = 1. - xi/( 1. + xi*fv1 );
+  Sbar = nutb*fv2/(kk*kk*d2);
+  dSbardnu = (1./(kk*kk*d2))*( fv2 + xi*(nu*xi2*dfv1dnu - 1.)/((1.+xi*fv1)^2) );
+  Stilde = Sbar + S0;
+  dStildednu = dSbardnu;
+  dStildeduv = dSduv;
+  rp = nutb/(Stilde*kk*kk*d2);
+  r = (rp<0. || rp>10.)*(10.) + (rp>=0. && rp<=10.)*rp;
+  drdnu = (rp>=0. && rp<=10.)*r*(1./nutb - dStildednu/Stilde);
+  drduv = (rp>=0. && rp<=10.)*( - r*dStildeduv/Stilde );
+  g = r + cw2*(r^6-r);
+  dgdr = 1. + cw2*(6.*r^5-1.);
+  
+  fw = g*(( 1. + cw3^6 )/( g^6 + cw3^6 ) )^(1./6.);
+  dfwdg = (((1.+cw3^6)/(g^6+cw3^6))^(1./6.))*( 1. - (g^6)/(g^6+cw3^6) );
+  dfwdnu = dfwdg*dgdr*drdnu;
+  dfwduv = dfwdg*dgdr*drduv;
+  
+  gn = 1. - 1000.*xi2/( 1. + xi2 );
+  dgndxi = - 2000.*xi/( ( 1. + xi2 )^2 );
+  
+  su = (xi>=0.)*( cb1*Stilde*nutb - cw1*fw*(nutb^2)/d2 + (cb2/sigma)*(dx(nutb)^2 + dy(nutb)^2) )
+  + (xi< 0.)*( cb1*S*nutb*gn   + cw1*(nutb^2)/d2    + (cb2/sigma)*(dx(nutb)^2 + dy(nutb)^2) );
+  s = su;
+  
+  dsdnuu = (xi>=0.)*( cb1*(dStildednu*nutb + Stilde) - cw1*( dfwdg*dgdr*drdnu*nutb*nutb/d2 + 2.*fw*nutb/d2 ) ) + (xi<0.)*( cb1*S*(gn + xi*dgndxi) + 2.*cw1*nutb/d2 );
+  dsdnu = dsdnuu;
+  
+  dsduvu = (xi>=0.)*( cb1*nutb*dStildeduv - cw1*nutb*nutb*dfwdg*dgdr*drduv/d2 ) + (xi<0.)*cb1*nutb*gn*dSduv;
+  dsduv = dsduvu;
+  
+  dsddxnu = ( 2.*cb2*dx(nutb)/sigma );
+  dsddynu = ( 2.*cb2*dy(nutb)/sigma );
+  
+  
+  //===================================
+  // Compute inputs for neural network
+  //===================================
+  
+  //-----------Q1
+  
+  // Compute feature Q1: Q criterion
+  Uh num,den,aux,Smag,Omag,Ecin,Q1,Q2,Q3,Q4,Q5,Q6,Q7,Q8;
+  Smag = sqrt( 2*dx(ub)^2 + 2*dy(vb)^2 + (dy(ub) + dx(vb))^2 ) ;
+  Omag = sqrt( (dy(ub) - dx(vb))^2 ) ;
+  num = 0.5*(Omag^2-Smag^2);
+  den = num+Smag^2 + 0.0001;
+  Q1 = num/den;
+  //cout << Q1[].max << " " << Q1[].min << endl;
+  
+  //-----------Q2
+  
+  // Compute feature Q2: Ferrero's blending function
+  Uh rd;
+  num = abs(nu+nutb);
+  den = d2*kk^2*sqrt((dx(ub))^2+(dx(vb))^2+(dy(ub))^2+(dy(vb))^2);
+  rd = num/(den+0.0001);
+  Q2 = 1 - tanh((rd)^0.5); // Ferrero's function
+  //cout << Q2[].max << " " << Q2[].min << endl;
+  
+  //-----------Q3
+  
+  // Compute feature Q3: new blending function
+  num = abs(nu+nutb);
+  den = d2*kk^2*sqrt((dx(ub))^2+(dx(vb))^2+(dy(ub))^2+(dy(vb))^2);
+  rd = num/(den+0.0001);
+  Q3 = 1./(1.+rd);
+  //cout << Q3[].max << " " << Q3[].min << endl;
+  
+  //-----------Q4
+  
+  // Compute feature Q4: Spallart's blending function
+  num = nu+nutb;
+  den = d2*kk^2*sqrt((dx(ub))^2+(dx(vb))^2+(dy(ub))^2+(dy(vb))^2);
+  rd = num/(den+0.0001);
+  Q4 = 1 - tanh((8*rd)^3);
+  //cout << Q4[].max << " " << Q4[].min << endl;
+  
+  //-----------Q5
+  
+  // Compute feature Q5: Viscosity ratio
+  num =  nutb * fv1;
+  den = num + 100.*nu;
+  Q5 = num/den;
+  //cout << Q5[].max << " " << Q5[].min << endl;
+  
+  //-----------Q6
+  
+  // Compute feature Q6: SA - production / destruction
+  num =  abs(cb1 * Stilde * nutb ) ;
+  den = abs(num) + ( cw1 * fw )*(nutb/d)^2 + 0.0001;
+  Q6 = num/den;
+  //cout << Q6[].max << " " << Q6[].min << endl;
+  
+  //-----------Q7
+  
+  // Compute feature Q7: SA - production / diffusion
+  num =  abs(cb1 * Stilde * nutb ) ;
+  den = abs(num) + (cb2/sigma)*(dx(nutb)^2 + dy(nutb)^2) + 0.0001;
+  Q7 = num/den;
+  //cout << Q7[].max << " " << Q7[].min << endl;
+  
+  //-----------Q8
+  
+  // Compute feature Q8: k_qcr
+  Ecin = ub*ub + vb*vb;
+  num = abs(5.303300858899107  * nutb * fv1 * Smag);
+  den = num + 0.5*Ecin + 0.0001;
+  Q8 = num/den;
+  //cout << Q8[].max << " " << Q8[].min << endl;
+  
+  // ===========================
+  // PRINT INPUT
+  //============================
+  
+  int j;
+  real[int] eta(8);
+  real[int] fnn(1);
+  Uh fxnn, fynn;
+  {
+     ofstream file("./features.txt");
+     for (int i=0; i<Uh.ndof; i++){
+     
+       file  << Q1[][i] << " "
+             << Q2[][i] << " "
+             << Q3[][i] << " "
+             << Q4[][i] << " "
+             << Q5[][i] << " "
+             << Q6[][i] << " "
+             << Q7[][i] << " "
+             << Q8[][i] << endl;
+     }
+  }
+  return 0;
+}
+
+func real[int] NN(real[int] &flow){
+  
+  // ===========================
+  // COMPUTE OUTPUT
+  //============================
+  UhxUhxPhxUh [ub,vb,pb,nutb]; ub[] = flow;
+  real cv1 = 7.1;
+  Uh xi = nutb/nu;
+  Uh xi2 = xi*(nutb/nu);
+  Uh xi3 = xi2*(nutb/nu);
+  Uh csiSA = (xi>=0.)*nu*(1.+xi) + (xi<0.)*nu*(1.+xi+0.5*xi2);
+  Uh fv1 = (xi3)/(xi3 + cv1^3);
+  Uh nuT = nutb*fv1;
+  
+  // For distance function
+  P0h d,d2;
+  {
+    ifstream file("../../../../mesh/mesh_training/h"+nummesh+"/distance-wall-h"+nummesh+".txt");
+    file >> d[];
+    d2 = d*d;
+  }
+  
+  real[int] fnn(1);
+  Uh fxnn, fynn, fx, fy;
+  
+  int Res = system("python libff/lib-nn.py");
+  
+  ifstream file ("./field_param.txt");
+  for(int nbdof = 0; nbdof < Uh.ndof; nbdof++){
+    file >> fxnn[][nbdof];
+  }
+  fxnn = fxnn*nu;
+
+  // We impose that nutNN > 0
+  fx = (fxnn>=0.)*fxnn - nuT;
+  //fx = (fxnn+nuT>=0.)*fxnn + (fxnn+nuT<0.)*(-nuT+nu);
+  plot(fx,cmm="dnuT");
+  
+  // We impose that dnut is zero at the wall via the distance function
+  real tck = 0.0001;
+  fx = fx * (d>=tck);
+  
+  return fx[];
+  
+}
+
+func real[int] RF(real[int] &flow){
+  
+  // ===========================
+  // COMPUTE OUTPUT
+  //============================
+  UhxUhxPhxUh [ub,vb,pb,nutb]; ub[] = flow;
+  real cv1 = 7.1;
+  Uh xi = nutb/nu;
+  Uh xi2 = xi*(nutb/nu);
+  Uh xi3 = xi2*(nutb/nu);
+  Uh csiSA = (xi>=0.)*nu*(1.+xi) + (xi<0.)*nu*(1.+xi+0.5*xi2);
+  Uh fv1 = (xi3)/(xi3 + cv1^3);
+  Uh nuT = nutb*fv1;
+  
+  // For distance function
+  P0h d,d2;
+  {
+    ifstream file("../../../../mesh/mesh_training/h"+nummesh+"/distance-wall-h"+nummesh+".txt");
+    file >> d[];
+    d2 = d*d;
+  }
+  
+  real[int] fnn(1);
+  Uh fxnn, fynn, fx, fy;
+
+  int Res = system("python libff/lib-rf.py");
+
+  ifstream file ("./field_param.txt");
+  for(int nbdof = 0; nbdof < Uh.ndof; nbdof++){
+    file >> fxnn[][nbdof];
+  }
+  fxnn = fxnn*nu;
+
+  // We impose that nutNN > 0
+  fx = (fxnn>=0.)*fxnn - nuT;
+  //fx = (fxnn+nuT>=0.)*fxnn + (fxnn+nuT<0.)*(-nuT+nu);
+  plot(fx,cmm="dnuT");
+  
+  // We impose that dnut is zero at the wall via the distance function
+  real tck = 0.0001;
+  fx = fx * (d>=tck);
+  
+  return fx[];
+  
+}

@@ -1,0 +1,84 @@
+include "getARGV.idp"
+load "MUMPS"
+load "bfstream"
+
+int nummesh;   // Mesh index
+cout << "Insert bump height:" << endl;
+cin >> nummesh;
+string ML; ML = "RF"; //NN or RF
+
+// Physical parameters
+real Retheta    = 2500;
+real Umax       = 16.8;
+real deltatheta = 0.0036;
+real nu         = Umax * deltatheta / Retheta ;
+
+// numerical parameters
+int NSmaxiter  = 20;    // maximum number of iteration for NS solver
+int NSiter;             // number of Newton iteration for NS solver
+real NStoll    = 1.e-8; // tollerance for NS solver
+bool waitplt   = false; // flag to wait after plot
+
+// mesh and FEM spaces
+mesh th = readmesh("../../../../mesh/mesh_training/h"+nummesh+"/mesh_bump_h"+nummesh+".msh");
+
+// define spaces
+func Pku = P1b;
+func Pkp = P1;
+fespace UhxUhxPhxUh(th,[Pku,Pku,Pkp,Pku]); // RANS flow
+fespace UhxUhxPh(th,[Pku,Pku,Pkp]);        // (u,v,p) flow
+fespace Uh(th,Pku);                        // velocity component
+fespace Ph(th,Pkp);                        // pressure
+fespace Nh(th,Pku);                        // turbulent viscosity
+fespace P0h(th,P0);                        // P0 FEM space
+
+// load NS solver (requires spaces definition)
+include "libff/lib-ns.idp"
+
+// load NN utils
+include "libff/lib-nn.edp"
+
+// Initialize assimilation solution (RANS)
+UhxUhxPhxUh [u,v,p,nut],[u0,v0,p0,nut0];
+UhxUhxPh [uu,vv,pp];
+Nh nutb, dnuT;
+
+{
+  ifstream file("../../../../baseline-shorter/results/h"+nummesh+"/baseline-solution-h"+nummesh+"-Re-"+Retheta+".txt");
+  file >> uu[];
+  file >> nutb[];
+  [u,v,p,nut] = [uu,vv,pp,nutb];
+  u0[]  = u[];
+  dnuT[]  = 0.0;
+}
+
+// Compute nuT Spalart
+real cv1 = 7.1;
+Uh xi = nutb/nu;
+Uh xi2 = xi*(nutb/nu);
+Uh xi3 = xi2*(nutb/nu);
+Uh csiSA = (xi>=0.)*nu*(1.+xi) + (xi<0.)*nu*(1.+xi+0.5*xi2);
+Uh fv1 = (xi3)/(xi3 + cv1^3);
+Uh nuT = nutb*fv1;
+
+// Compute input features
+int dummy = computeInputs(u[]);
+
+if (ML == "NN"){
+  dnuT[] = NN(u[]);
+}
+else{
+  dnuT[] = RF(u[]);
+}
+
+// =======================================
+// Compute NS solution
+// =======================================
+NSiter = NS(uu[],dnuT[],nuT[],nu,NStoll,NSmaxiter);
+
+{
+  ofstream file("./results/h"+nummesh+"/nn-solution-mesh-"+nummesh+".txt");
+  file.precision(16);
+  file << uu[] << endl;
+  file << dnuT[] << endl;
+}

@@ -1,0 +1,136 @@
+// Mesh index
+int nummesh = 26;
+
+// geometrical parameters
+real C      = 305.0 /1000.0;
+real L      = C - 2.0 * ( C / 12.0 );
+real H      = 152.0 / 1000.0;
+real l      = C / 3.0 ;
+
+real R1     = 0.323 * C;
+real hp     = R1 - sqrt( R1^2 - ((C-L)/2.0)^2 );
+
+real hoC    = 0.0878; // approx 26.0 / 305.0 ;
+real h      = hoC * C;
+
+real hpp    = h - hp;
+real R2     = ( hpp^2 + (L/2.0)^2 ) / ( 2.0 * hpp ) ;
+
+// geometrical parameter for inner discretization of boundary layer
+real hh     = 2.0 * h; // parameter used for wall-refinement
+
+// discretization parameters
+real deltay = 0.05/1000.; // discretization in 'y' at the wall
+real Deltay = 3.0/1000.;  // discretization in 'y' at the freestream
+real deltax = 2.0/1000.;  // discretization in 'x' for the entire domain
+
+//
+real Ky,cy,dty;
+Ky   = deltay*( hh - Deltay )/( Deltay - deltay );
+cy   = log( 1. + hh/Ky );
+dty  = (1./cy)*log( 1. + deltay/Ky );
+
+// First mesh
+int[int] lab1l = [2,10,10,1];
+mesh th1l = square(l/deltax,1./dty,[-l+l*x,Ky*(exp(cy*y)-1.)],label=lab1l,flags=2);
+int[int] lab1u = [10,10,4,1];
+mesh th1u = square(l/deltax,(H-hh)/Deltay,[-l+l*x,hh+(H-hh)*y],label=lab1u,flags=2);
+mesh th1  = th1l + th1u;
+plot(th1,wait=1);
+
+// Second mesh
+int[int] lab2l = [2,10,10,10];
+mesh th2l = square(0.5*(C-L)/deltax,1./dty,[0.5*(C-L)*x,Ky*(exp(cy*y)-1.)],label=lab2l,flags=2);
+int[int] lab2u = [10,10,4,10];
+mesh th2u = square(0.5*(C-L)/deltax,(H-hh)/Deltay,[0.5*(C-L)*x,hh+(H-hh)*y],label=lab2u,flags=2);
+mesh th2  = th2l + th2u;
+th2       = movemesh(th2,[x,y+((H-y)/H)*(R1-sqrt(R1^2-x^2))]);
+plot(th2,wait=1);
+
+// Third mesh
+int[int] lab3l = [2,10,10,10];
+mesh th3l = square(L/deltax,1./dty,[0.5*(C-L)+L*x,Ky*(exp(cy*y)-1.)],label=lab3l,flags=2);
+int[int] lab3u = [10,10,4,10];
+mesh th3u = square(L/deltax,(H-hh)/Deltay,[0.5*(C-L)+L*x,hh+(H-hh)*y],label=lab3u,flags=2);
+mesh th3  = th3l + th3u;
+th3       = movemesh(th3,[x,y+((H-y)/H)*(-R2+h+sqrt(R2^2-(C/2.0-x)^2))]);
+plot(th3,wait=1);
+
+// Fourth mesh
+int[int] lab4l = [2,10,10,10];
+mesh th4l = square(0.5*(C-L)/deltax,1./dty,[0.5*(C-L)*x,Ky*(exp(cy*y)-1.)],label=lab4l,flags=0);
+int[int] lab4u = [10,10,4,10];
+mesh th4u = square(0.5*(C-L)/deltax,(H-hh)/Deltay,[0.5*(C-L)*x,hh+(H-hh)*y],label=lab4u,flags=0);
+mesh th4  = th4l + th4u;
+th4       = movemesh(th4,[x,y+((H-y)/H)*(R1-sqrt(R1^2-x^2))]);
+th4       = movemesh(th4,[C-x,y]);
+plot(th4,wait=1);
+
+// Fifth mesh
+int[int] lab5l = [2,3,10,10];
+mesh th5l = square(l/deltax,1./dty,[C+2*l*x,Ky*(exp(cy*y)-1.)],label=lab5l,flags=2);
+int[int] lab5u = [10,3,4,10];
+mesh th5u = square(l/deltax,(H-hh)/Deltay,[C+2*l*x,hh+(H-hh)*y],label=lab5u,flags=2);
+mesh th5  = th5l + th5u;
+plot(th5,wait=1);
+
+mesh th = th1 + th2 + th3 + th4 + th5;
+plot(th);
+
+cout << "This mesh has " << th.nt << " triangles and " << th.nv << " vertices " << endl;
+
+savemesh(th,"mesh_bump_h"+nummesh+".msh");
+
+{
+	load "MUMPS_seq"
+	load "distance"
+	fespace fu1(th,P1);
+	fespace f0(th,P0);
+	fu1 lset,rhslset,dist;
+	f0 d,d2;
+	varf Lap(u,v) = int2d(th)( dx(u)*dx(v) + dy(u)*dy(v) ) + on(2,u=0.) + on(4,u=1.);
+	matrix KK = Lap(fu1,fu1,solver=sparsesolver,tgv=-1);
+	rhslset[] = Lap(0,fu1,tgv=-1);
+	lset[] = KK^-1*rhslset[];
+	plot(lset);
+	
+	dist = lset;
+	distance(th,lset,dist[]);
+	plot(dist);
+
+	d  = dist;
+	d2 = d*d;
+	{
+		ofstream file("distance-wall-h"+nummesh+".txt");
+		file.precision(16);
+		file << d[];
+	}
+}
+
+
+// Export tecplot file
+
+int nbv = th.nv;
+int nbt = th.nt;
+
+{
+  ofstream file("tcp-mesh-bump-h"+nummesh+".dat");
+  file <<"TITLE = "<<"BUMP"<<endl;
+  file << "VARIABLES = \"X\" ,  \"Y\"  " << endl;
+  //file << "ZONE NODES=" << nbv << " , ELEMENTS = " << nbt << " , DATAPACKING = POINT , ZONETYPE=FETRIANGLE " << endl;
+  file << "ZONE"<<"   "<<"N="<<th.nv<<","<<"E="<<th.nt<<","<<"F=FEPOINT,ET=TRIANGLE"<<endl;
+  
+  for (int i=0; i<nbv; i++){
+  real xt = th(i).x;
+  real yt = th(i).y;
+  file  << xt << " "
+        << yt
+        << endl;
+  };
+  
+  // List connectivity
+  for (int k=0; k<nbt; k++){
+  file << int(th[k][0])+1 << " " << int(th[k][1])+1 << " " << int(th[k][2])+1 << endl;
+  };
+};
+

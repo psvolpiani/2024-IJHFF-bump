@@ -1,0 +1,133 @@
+/////////////////////
+// Set parameters //
+////////////////////
+
+// Bump number
+int nummesh;   // Mesh index
+cout << "Insert bump height:" << endl;
+cin >> nummesh;
+
+// Physical parameters
+real Retheta = 2500;
+real Umax       = 16.8;
+real deltatheta = 0.0036;
+real nu         = Umax * deltatheta / Retheta ;
+
+/////////////////////////////////////
+// Read mesh and create FEM spaces //
+/////////////////////////////////////
+
+mesh th =  readmesh("../mesh/mesh_interp/h"+nummesh+"/mesh_bump_h"+nummesh+".msh");
+
+fespace fuuuuup(th,[P1b,P1b,P1b,P1b,P1b,P1b,P1]);
+fespace fu(th,P1b);
+fespace fp(th,P1);
+
+cout << "n DoF (V) : " << fu.ndof << endl;
+cout << "n DoF (P) : " << fp.ndof << endl;
+
+////////////////
+// Read file  //
+////////////////
+
+fuuuuup [u,v,uu,vv,ww,uv,p];
+
+{
+	ifstream file("./results/h"+nummesh+"/reference-Ue-Ve-UUe-VVe-WWe-UVe-Pe-h"+nummesh+".txt");
+	file >> u[];
+}
+
+plot(u ,cmm="u");
+plot(v ,cmm="v");
+plot(uu,cmm="uu");
+plot(vv,cmm="vv");
+plot(ww,cmm="ww");
+plot(uv,cmm="uv");
+plot(p ,cmm="p");
+
+//////////////////
+// Compute nut  //
+//////////////////
+
+fu kk    = ( uu + vv + ww )/2.;
+varf vProd(phi,psi) = int2d(th)( ( ( - uu + (2./3.)*kk )*2.*dx(u) - 2.*uv*(dy(u)+dx(v)) + ( - vv + (2./3.)*kk )*2.*dy(v) ) * psi );
+varf vDest(phi,psi) = int2d(th)( (4.*(dx(u)^2) + 4.*(dy(v)^2) + 2.*((dx(v)+dy(u))^2) ) * psi );
+varf vMass(phi,psi) = int2d(th)( phi * psi );
+
+matrix MM = vMass(fu,fu);
+fu prodr  = vProd(0,fu);
+fu destr  = vDest(0,fu);
+fu prod; prod[] = MM^-1 * prodr[];
+fu dest; dest[] = MM^-1 * destr[];
+
+fu nuT, nut;
+nuT = min(max(0., prod/dest), 5000*nu);
+
+plot(nuT,cmm="nuT");
+
+// Newton
+real tolnewton = 1.e-4;
+real errnewton = 2.*tolnewton;
+int itenewton  = 0;
+real cv1 = 7.1;
+
+fu NUT,CHI,DCHI,DEN;
+NUT = nuT/nu;
+CHI = NUT;
+
+while(errnewton>tolnewton){
+  DEN        = ( 4. * CHI^3 - 3. * NUT * CHI^2 );
+  DCHI       = ( NUT * ( CHI^3 + cv1^3 ) - CHI^4 ) / ( DEN + 10. );
+  errnewton  = DCHI[].l2;
+  CHI[]     += DCHI[];
+  cout << "Error newton " << errnewton << endl;
+  plot(DEN,cmm="DEN");
+  plot(CHI,cmm="chi");
+}
+
+plot(CHI,cmm="nut/nu - SA");
+
+CHI[] *= nu;
+
+fu nute = CHI;
+fu ue   = u;
+fu ve   = v;
+fp pe   = p;
+
+////////////////////////////
+// Write results in file  //
+////////////////////////////
+
+{
+	ofstream file("./results/h"+nummesh+"/reference-Ue-Ve-Pe-nute-h"+nummesh+".txt");
+	file << ue[]  << endl;
+	file << ve[]  << endl;
+	file << pe[]  << endl;
+	file << nute[] << endl;
+}
+
+/////////////////////////////////////
+// Write results in tecplot format //
+/////////////////////////////////////
+
+int nbv = th.nv;
+int nbt = th.nt;
+
+{
+  ofstream file("./results/h"+nummesh+"/reference-Ue-Ve-Pe-nute-h"+nummesh+"-tecplot.dat");
+  file <<"TITLE = "<<"PHILL"<<endl;
+  file << "VARIABLES = \"X\" ,  \"Y\" , \"ue\" , \"ve\", \"pe\" , \"nute\" , \"nuTe\" " << endl;
+  //file << "ZONE NODES=" << nbv << " , ELEMENTS = " << nbt << " , DATAPACKING = POINT , ZONETYPE=FETRIANGLE " << endl;
+  file << "ZONE"<<"   "<<"N="<<th.nv<<","<<"E="<<th.nt<<","<<"F=FEPOINT,ET=TRIANGLE"<<endl;
+  
+  for (int i=0; i<nbv; i++){
+  real xt = th(i).x;
+  real yt = th(i).y;
+  file << xt << " " << yt << " " << ue(xt,yt) << " " << ve(xt,yt) << " " << pe(xt,yt) << " " << nute(xt,yt) << " " << nuT(xt,yt) << endl;
+  };
+  
+  // List connectivity
+  for (int k=0; k<nbt; k++){
+  file << int(th[k][0])+1 << " " << int(th[k][1])+1 << " " << int(th[k][2])+1 << endl;
+  };
+};

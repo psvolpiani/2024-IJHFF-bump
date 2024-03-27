@@ -1,0 +1,157 @@
+// ===========================
+// RANS solver
+// ===========================
+
+func int NS(real[int] &flow, real[int] &dnuT, real[int] &nuT, real nu, real toll, int maxiter)
+{
+	cout << endl << "Navier Stokes solver: " << endl;
+	
+	// Unwrap inputs
+	UhxUhxPh [ub1, ub2 ,pb]; ub1[] = flow;
+	UhxUhxPh [u0, v0, p0]; u0[] = flow;
+	Uh ffx; ffx[] = dnuT;
+	Uh nuT0;	nuT0[] = nuT;
+
+	// Robustness parameters
+	real CFL,CFLmin,CFLmax;
+	CFLmin = 1.;
+	CFLmax = 1.e+10;
+	Nh dt,dtau;
+
+	// Relaxation parameter to slowly introduce the new forcing
+	real beta;
+	int I=5; // iterations for beta
+
+	// define NS problem
+	UhxUhxPh [du1,du2,dp];
+	UhxUhxPh [r1 ,r2 ,rp]; 
+
+	// Matrices
+	matrix A,DDX,DDY,Mu;
+
+	real M     = 0.00001;
+	real MSUPG = 0.1;
+
+	Uh TauSUPG,NormeT,ReT,chiT;
+	Uh dNormeTdu,dNormeTdv,dReTdu,dReTdv,dchiT,dTauSUPGdu,dTauSUPGdv;
+	P0h hT;
+	
+	// We calculate the 'mesh size'
+	hT  = sqrt(2.)*area/hTriangle;
+	
+	// Variational formulations
+	varf NS([du1,du2,dp],[v1,v2,q]) = int2d(th)( 
+					+ (nu+nuT0+beta*ffx)*(2*dx(du1)*dx(v1)+(dy(du1)+dx(du2))*dy(v1)+2*dy(du2)*dy(v2)+(dx(du2)+dy(du1))*dx(v2))// Diffusive terms in NS
+					+ v1*(du1*dx(ub1)+du2*dy(ub1)+ub1*dx(du1)+ub2*dy(du1))                                                    // Convective terms in NS
+					+ v2*(du1*dx(ub2)+du2*dy(ub2)+ub1*dx(du2)+ub2*dy(du2))                                                    // Convective terms in NS
+					- dp*(dx(v1)+dy(v2))                                                                                      // Pressure
+					- q*(dx(du1)+dy(du2))                                                                                     // Div(u)
+					// Stabilisation
+ 					+ TauSUPG*                          ( du1 *dx(v1) + du2 *dy(v1) )*( ub1*dx(ub1)  + ub2*dy(ub1) )  
+ 					+ TauSUPG*                          ( du1 *dx(v2) + du2 *dy(v2) )*( ub1*dx(ub2)  + ub2*dy(ub2) )
+ 					+ TauSUPG*                          ( ub1*dx(v1)  + ub2*dy(v1)  )*( du1 *dx(ub1) + du2 *dy(ub1) + ub1*dx(du1)  + ub2*dy(du1) )  
+ 					+ TauSUPG*                          ( ub1*dx(v2)  + ub2*dy(v2)  )*( du1 *dx(ub2) + du2 *dy(ub2) + ub1*dx(du2)  + ub2*dy(du2) ) 
+					+ (dTauSUPGdu*du1 + dTauSUPGdv*du2)*( ub1*dx(v1)  + ub2*dy(v1)  )*( ub1*dx(ub1)  + ub2*dy(ub1) )  
+					+ (dTauSUPGdu*du1 + dTauSUPGdv*du2)*( ub1*dx(v2)  + ub2*dy(v2)  )*( ub1*dx(ub2)  + ub2*dy(ub2) )
+					)
+					+ on(1,2,4,du1=1.,du2=1.); //as LES
+
+	varf NSrhs([du1,du2,dp],[v1,v2,q])=	-int2d(th)(
+          + (nu+nuT0+beta*ffx)*(2*dx(ub1)*dx(v1)+(dy(ub1)+dx(ub2))*dy(v1)+2*dy(ub2)*dy(v2)+(dx(ub2)+dy(ub1))*dx(v2))
+					+ v1*(ub1*dx(ub1)+ub2*dy(ub1)) + v2*(ub1*dx(ub2)+ub2*dy(ub2))
+					- pb*(dx(v1)+dy(v2)) - q*(dx(ub1)+dy(ub2))
+					// Stabilisation
+					+ TauSUPG*(ub1*dx(v1) +ub2*dy(v1) )*(ub1*dx(ub1) +ub2*dy(ub1) )  
+					+ TauSUPG*(ub1*dx(v2) +ub2*dy(v2) )*(ub1*dx(ub2) +ub2*dy(ub2) ) 
+					)
+					+ on(1,2,4,du1=0.0,du2=0.0) ; //as LES
+	
+	varf mass(phi,phih) = int2d(th)( phi*phih );	
+	varf DX(phi,phih)   = int2d(th)( dx(phi)*phih );		
+	varf DY(phi,phih)   = int2d(th)( dy(phi)*phih );			
+
+	DDX = DX(Nh,Nh);					
+	DDY = DY(Nh,Nh);					
+	Mu  = mass(Nh,Nh);					
+	set(Mu,solver=sparsesolver);
+
+	// Newton method
+	real res,dun;
+	int  iter;
+
+	// Flag for convergence
+	int maxitereffective = maxiter;
+	
+	while(maxitereffective<400){
+		for(iter=1;iter<maxitereffective+1;iter++){
+			// - compute the relaxation parameter in function of iter
+			beta = (iter<=I)*( 1.*(0.5*sin(pi*iter/I-pi/2.) + .5) ) + (iter>I)*1.;
+			cout << "Parameter beta at iteration " << iter << " : " << beta << endl;
+
+			// Stabilization
+			NormeT     = sqrt( ub1*ub1+ub2*ub2 + MSUPG^2);
+			ReT        = 0.5*NormeT*hT/nu;
+			chiT       = (ReT<=3)*(ReT/3.) + (ReT>3)*(1.);
+			TauSUPG    = chiT*hT/(2.*NormeT);
+			dNormeTdu  = ub1/sqrt( ub1*ub1+ub2*ub2 + MSUPG^2);
+			dNormeTdv  = ub2/sqrt( ub1*ub1+ub2*ub2 + MSUPG^2);
+			dReTdu     = 0.5*hT*dNormeTdu/nu;
+			dReTdv     = 0.5*hT*dNormeTdv/nu;
+			dchiT      = (1./3.)*(ReT<3.);
+			dTauSUPGdu = (hT/2.)*( - (chiT/(NormeT^2))*dNormeTdu + dchiT*dReTdu/NormeT );
+			dTauSUPGdv = (hT/2.)*( - (chiT/(NormeT^2))*dNormeTdv + dchiT*dReTdv/NormeT );
+		
+
+			// - compute residue (and store the previous one) 
+			r1[] = NSrhs(0,UhxUhxPh,tgv=1.e+30);
+			res  = r1[].l2;
+
+			// build matrix and rhs
+			{
+				cout << "  -- build matrix" << endl;
+				A=NS(UhxUhxPh,UhxUhxPh,tgv=1.e+30);
+				set(A,solver=sparsesolver);
+			}
+			
+			// - solve for increment
+			du1[] = A^-1*r1[];
+			dun   = sqrt(int2d(th)( du1^2 + du2^2 ));
+
+			// - update solution
+			ub1[] += du1[];
+
+			plot(ub1,value=1,wait=waitplt,cmm="ub1 inside Newton algo.");
+			plot(ub2,value=1,wait=waitplt,cmm="ub2 inside Newton algo.");
+			plot(pb,value=1,wait=waitplt,cmm="pb inside Newton algo.");
+
+			// - finalise iteration
+			cout << "  iter " << iter << ": " << res << " (" << dun << ")" << endl;
+      
+			// - exit conditions
+			// -- converged:
+			if((res < toll) & (iter>=I)){
+				cout << "  Newton converged in "+iter+" iterations" << endl;
+				flow = ub1[]; 
+				return iter;
+			}
+
+			// -- diverged:
+			if((res >= 1.) & (iter>1)){
+				cout << "  Newton diverged" << endl;
+				iter = maxitereffective + 1;
+			}
+		}
+
+		ub1[]             = u0[];
+		maxitereffective *= 2;
+		I                *= 2;	
+	}
+
+	// Not converged:
+	cout << "  Newton did not converge" << endl;
+	if(res>=1.) return -iter;
+	else{
+		//flow = ub1[]; 
+		return 0;
+	}
+}

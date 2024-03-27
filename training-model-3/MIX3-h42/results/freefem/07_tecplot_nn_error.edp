@@ -1,0 +1,89 @@
+// Get mesh index and solution type
+int nummesh;     // Mesh index
+cout << "Insert bump height:" << endl;
+cin >> nummesh;
+
+// Parameters
+real Retheta    = 2500;
+real Umax       = 16.8;
+real deltatheta = 0.0036;
+real nu         = Umax * deltatheta / Retheta ;
+
+func Pku = P1b;     // Polynomial type for velocity
+func Pkp = P1;      // Polynomial type for pressure
+int ku = 2;         // Degree of the polynoms (2 for P2dc ...)
+int kp = 1;         // Order of interpolation for the pressure
+int qfo = 3*ku+1;   // Order of quadrature
+
+// Read mesh and create finite element space
+
+mesh th = readmesh("../../../../mesh/mesh_training/h"+nummesh+"/mesh_bump_h"+nummesh+".msh");
+fespace fuupu(th,[Pku,Pku,Pkp,Pku]);
+fespace fuup(th,[Pku,Pku,Pkp]);
+fespace fuu(th,[Pku,Pku]);
+fespace fu(th,Pku);
+fespace f0(th,P0);
+int ndof = fuupu.ndof;
+int nbv = th.nv;
+int nbt = th.nt;
+
+// Declare variables and load solution
+
+fuup [ub,vb,pb];          // RANS flow
+fu  fx;                   // (fx,fy) flow
+{
+  ifstream file("./results/h"+nummesh+"/nn-solution-mesh-"+nummesh+".txt");
+  file >> ub[];
+  file >> fx[];
+}
+
+
+//  Import reference solution
+
+cout << "Importing reference solution" << endl;
+mesh the = readmesh("../../../../mesh/mesh_interp/h"+nummesh+"/mesh_bump_h"+nummesh+".msh");
+fespace fue(the,Pku);
+fespace fpe(the,Pkp);
+fue ue, ve, nute;
+fpe pe;
+
+{
+  ifstream file("../../../../reference/results/h"+nummesh+"/reference-Ue-Ve-Pe-nute-h"+nummesh+".txt");
+  file >> ue[]  ;
+  file >> ve[]  ;
+  file >> pe[]  ;
+  file >> nute[] ;
+}
+
+// compute cost function
+real J = int2d(th)( sqrt( (ub-ue)^2 + (vb-ve)^2 ) ) / int2d(th)(Umax);
+fu error =  sqrt( (ub-ue)^2 + (vb-ve)^2 )/Umax;
+cout << " J = " << J << endl;
+int iwait = 1;
+plot(error,value=1,wait=iwait);
+
+// Export tecplot file
+
+{
+  ofstream file("./results/h"+nummesh+"/nn-solution-h"+nummesh+"-Re-"+Retheta+"-tecplot.dat");
+  file <<"TITLE = "<<"BUMP"<<endl;
+  file << "VARIABLES = \"X\" ,  \"Y\" , \"ub\" , \"vb\" , \"pb\" , \"error\" " << endl;
+  file << "ZONE"<<"   "<<"N="<<th.nv<<","<<"E="<<th.nt<<","<<"F=FEPOINT,ET=TRIANGLE"<<endl;
+  
+  for (int i=0; i<nbv; i++){
+  real xt = th(i).x;
+  real yt = th(i).y;
+  file  << xt << " "
+        << yt << " "
+        << ub(xt,yt) << " "
+        << vb(xt,yt) << " "
+        << pb(xt,yt) << " "
+        << error(xt,yt)
+        << endl;
+  };
+  
+  // List connectivity
+  for (int k=0; k<nbt; k++){
+  file << int(th[k][0])+1 << " " << int(th[k][1])+1 << " " << int(th[k][2])+1 << endl;
+  };
+};

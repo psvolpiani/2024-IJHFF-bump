@@ -1,0 +1,179 @@
+load "MUMPS_seq"
+
+////////////////////////////////////
+////   Get mesh and Re number   ////
+////////////////////////////////////
+
+int nummesh;  // Mesh index
+real Retheta; // Reynolds number
+
+cout << "Insert bump height:" << endl;
+cin >> nummesh;
+
+cout << "Insert Reynolds number:" << endl;
+cin >> Retheta;
+
+////////////////////////////////
+////  Physical parameters   ////
+////////////////////////////////
+
+real Umax       = 16.8;
+real deltatheta = 0.0036;
+real nu         = Umax * deltatheta / Retheta ;
+
+real toler   = 1.e-6;
+
+///////////////////////////////////////////
+////  Read mesh and create FEM spaces  ////
+///////////////////////////////////////////
+
+mesh th = readmesh("../mesh/mesh_training/h"+nummesh+"/mesh_bump_h"+nummesh+".msh");
+func Pku     = P1b;
+func Pkp     = P1;
+fespace fuup(th,[Pku,Pku,Pkp]);        // (u,v,p) flow
+fespace fu(th,Pku);                        // velocity component
+fespace fp(th,Pkp);                        // pressure
+fespace P1h(th,P1);                        // P1 FEM space
+
+/////////////////////////////////
+////  Variable declaration   ////
+/////////////////////////////////
+
+fuup [uu,vv,pp];
+fu u,v,nut;
+fp p;
+P1h tempu1,tempu2,dxu,dxv,dyu,dyv;
+
+///////////////////////////////////
+////  Load baseline solution   ////
+///////////////////////////////////
+
+{
+	ifstream file("./results/h"+nummesh+"/baseline-solution-h"+nummesh+"-Re-"+Retheta+".txt");
+	file >> uu[];
+	u = uu;
+	v = vv;
+	p = pp;
+}
+
+////////////////////////////////////
+/////  Matrix for derivatives   ////
+////////////////////////////////////
+// We compute derivatives of the geometry itself, using second-order finite difference
+varf mass(phi,phih) = int2d(th)( phi*phih );	
+varf DX(phi,phih)   = int2d(th)( dx(phi)*phih );		
+varf DY(phi,phih)   = int2d(th)( dy(phi)*phih );			
+
+matrix DDX,DDY,Mu;
+DDX = DX(P1h,P1h);					
+DDY = DY(P1h,P1h);					
+Mu  = mass(P1h,P1h,solver=sparsesolver);					
+
+// To extract Cp,Cf
+tempu1   = u; 
+tempu2[] = DDX*tempu1[]; 
+dxu[]    = Mu^-1*tempu2[];
+tempu1   = u;    
+tempu2[] = DDY*tempu1[]; 
+dyu[]    = Mu^-1*tempu2[];
+tempu1   = v;    
+tempu2[] = DDX*tempu1[]; 
+dxv[]    = Mu^-1*tempu2[];
+tempu1   = v;    
+tempu2[] = DDY*tempu1[]; 
+dyv[]    = Mu^-1*tempu2[];
+
+////////////////////////////////////
+/////  Load distance function   ///
+///////////////////////////////////
+P1h d;
+
+{
+	load "distance"
+	P1h lset,rhslset;
+	varf Lap(u,v) = int2d(th)( dx(u)*dx(v) + dy(u)*dy(v) + u*v ) + on(2,u=0.);
+	varf RHS(u,v) = int2d(th)( 1.0*v ) + on(2,u=0.);
+	matrix KK     = Lap(P1h,P1h,solver=sparsesolver,tgv=-1);
+	rhslset[]     = RHS(0,P1h,tgv=-1);
+	lset[]        = KK^-1*rhslset[];
+	plot(lset);
+	
+	distance(th,lset,d[]);
+	plot(d);
+}
+
+P1h XX = x; plot(XX,cmm="x");
+P1h YY = y; plot(YY,cmm="y"); 
+
+/////////////////////////////////////////////////////////
+// Loop to find how many nodes there are on the wall   //
+/////////////////////////////////////////////////////////
+
+int Nx = 0;
+for(int ij = 0; ij < P1h.ndof; ij++){ 
+	if( ( d( XX[][ij] , YY[][ij] ) < toler ) && ( YY[][ij] < 1.1 ) ) Nx += 1; 
+}
+
+///////////////////////////////////
+// Loop to extract those nodes   //
+///////////////////////////////////
+
+real[int] Xc(Nx),Yc(Nx),XXc(Nx),YYc(Nx),dxf(Nx),nx(Nx),ny(Nx);
+int ix = 0;
+for(int ij = 0; ij < P1h.ndof; ij++){
+	if( ( d( XX[][ij] , YY[][ij] ) < toler ) && ( YY[][ij] < 1.1 ) ){
+		XXc(ix) = XX[][ij]; Xc(ix) = XXc(ix);
+		YYc(ix) = YY[][ij]; Yc(ix) = YYc(ix);
+		ix    += 1;
+	}	
+}
+
+//////////////////////////
+// Sort wall elements   //
+//////////////////////////
+
+// at this point, we need to sort the wall elements so that Xc[i+1]>Xc[i]
+// We do the dummest (but easiest) sorting algorithm, sacles with O(N^2)
+real auxx,auxy;
+for(int ix1 = 0; ix1 < Nx; ix1++){
+	real minx = Xc[ix1];
+	for(int ix2 = ix1; ix2 < Nx; ix2++){
+		if(minx>XXc[ix2]){
+			minx    = Xc(ix2);
+			auxx    = Xc(ix1);
+			auxy    = Yc(ix1);
+			Xc(ix1) = Xc(ix2);
+			Yc(ix1) = Yc(ix2);
+			Xc(ix2) = auxx;
+			Yc(ix2) = auxy;
+		}
+	}
+}
+
+/////////////////////////
+// Compute Cp and Cf   //
+/////////////////////////
+
+{
+	ofstream file("./results/h"+nummesh+"/baseline-X-Y-Cp-Cf-h"+nummesh+"-Re-"+Retheta+".dat");	
+}
+
+for(ix = 0; ix < Nx; ix++){
+	if(ix==0)        { dxf(0)    = ( Yc(1)    - Yc(Nx-1) ) / ( Xc(1)    - Xc(Nx-1) ); }
+	else if(ix==Nx-1){ dxf(Nx-1) = ( Yc(0)    - Yc(Nx-2) ) / ( Xc(0)    - Xc(Nx-2) ); }
+	else             { dxf(ix)   = ( Yc(ix+1) - Yc(ix-1) ) / ( Xc(ix+1) - Xc(ix-1) ); }
+	
+	// Wall-normal
+	nx[ix] = - dxf[ix]/sqrt( 1. + (dxf[ix])^2 );
+	ny[ix] =   1.     /sqrt( 1. + (dxf[ix])^2 );
+	
+	// Wall pressure and friction
+	real Cp,Cf;
+	Cf = nu*(  ny[ix]*( nx[ix]*2.*dxu(Xc[ix],Yc[ix]) + ny[ix]*(dxv(Xc[ix],Yc[ix]) +dyu(Xc[ix],Yc[ix]) )) 
+				- nx[ix]*( ny[ix]*2.*dyv(Xc[ix],Yc[ix]) + nx[ix]*(dyu(Xc[ix],Yc[ix]) +dxv(Xc[ix],Yc[ix]) )) );
+	Cp = (p(Xc[ix],Yc[ix])-p(Xc[0],Yc[0]));
+	{
+		ofstream file("./results/h"+nummesh+"/baseline-X-Y-Cp-Cf-h"+nummesh+"-Re-"+Retheta+".dat",append);
+		file << Xc[ix] << " " << Yc[ix] << " " << Cp << " " << Cf << endl;		
+	}
+}
